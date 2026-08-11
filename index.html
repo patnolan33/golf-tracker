@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Yardage Book</title>
+<meta name="theme-color" content="#101d16" />
+<meta name="description" content="Offline golf simulator session tracker and insights journal." />
+
+<link rel="manifest" href="./manifest.json" />
+<link rel="icon" href="./icon-192.png" />
+<link rel="apple-touch-icon" href="./icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Yardage Book" />
+
+<style>
+  html, body { margin: 0; padding: 0; background: #101d16; }
+  #root { min-height: 100vh; }
+  #boot-fallback {
+    color: #9fb2a1; font-family: system-ui, sans-serif; padding: 40px 20px;
+    text-align: center;
+  }
+</style>
+
+<!-- React + libraries (cached by the service worker after first load) -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/prop-types/prop-types.min.js"></script>
+<script src="https://unpkg.com/recharts/umd/Recharts.js"></script>
+<script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"><div id="boot-fallback">Loading Yardage Book…</div></div>
+
+<script type="text/babel" data-presets="react" src="./app.js"></script>
+
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("./sw.js").catch(() => {});
+    });
+  }
+</script>
+</body>
+</html>
