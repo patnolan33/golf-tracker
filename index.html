@@ -21,18 +21,50 @@
     color: #9fb2a1; font-family: system-ui, sans-serif; padding: 40px 20px;
     text-align: center;
   }
+  #boot-error {
+    display: none; color: #eee8d8; font-family: system-ui, sans-serif;
+    padding: 40px 20px; max-width: 480px; margin: 0 auto;
+  }
+  #boot-error pre {
+    font-size: 11px; color: #bd5b3c; background: #182a20; padding: 12px;
+    border-radius: 8px; white-space: pre-wrap; word-break: break-word;
+  }
 </style>
 
 <!-- React + libraries (cached by the service worker after first load) -->
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/prop-types/prop-types.min.js"></script>
-<script src="https://unpkg.com/recharts/umd/Recharts.js"></script>
 <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </head>
 <body>
 <div id="root"><div id="boot-fallback">Loading Yardage Book…</div></div>
+<div id="boot-error">
+  <div style="font-weight:700; font-size:17px; margin-bottom:8px;">Couldn't load a required library</div>
+  <div style="font-size:13px; color:#9fb2a1; margin-bottom:14px; line-height:1.5;">
+    One of the scripts this app needs (React, PapaParse, or Babel) failed to load — usually a connectivity issue on first load. Reconnect and reload the page. Details:
+  </div>
+  <pre id="boot-error-detail"></pre>
+</div>
+
+<script>
+  // If a required library never showed up, surface a visible message instead
+  // of leaving the "Loading…" placeholder forever.
+  window.addEventListener("load", () => {
+    setTimeout(() => {
+      const missing = [];
+      if (typeof React === "undefined") missing.push("React");
+      if (typeof ReactDOM === "undefined") missing.push("ReactDOM");
+      if (typeof Papa === "undefined") missing.push("PapaParse");
+      if (typeof Babel === "undefined") missing.push("Babel");
+      if (missing.length) {
+        document.getElementById("root").style.display = "none";
+        document.getElementById("boot-error").style.display = "block";
+        document.getElementById("boot-error-detail").textContent = "Missing: " + missing.join(", ");
+      }
+    }, 4000);
+  });
+</script>
 
 <script type="text/babel" data-presets="react" src="./app.js"></script>
 

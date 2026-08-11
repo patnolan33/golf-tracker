@@ -6,10 +6,6 @@
    the same app logic.
    ============================================================ */
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
-const {
-  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ScatterChart, Scatter, Cell, ReferenceLine, ReferenceArea, LineChart, Line,
-} = Recharts;
 
 // window.storage polyfill (Claude artifacts provide this natively;
 // here we back it with localStorage, namespaced to this app).
@@ -58,6 +54,29 @@ const Info = (p) => <Icon {...p}><circle cx="12" cy="12" r="9" /><path d="M12 11
 const Trash2 = (p) => <Icon {...p}><path d="M4 7h16" /><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" /><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" /><path d="M10 11v6" /><path d="M14 11v6" /></Icon>;
 const CalendarDays = (p) => <Icon {...p}><rect x="4" y="5" width="16" height="16" rx="2" /><path d="M4 10h16" /><path d="M8 3v4" /><path d="M16 3v4" /></Icon>;
 const CheckCircle2 = (p) => <Icon {...p}><circle cx="12" cy="12" r="9" /><path d="M8.5 12.5l2.3 2.3L16 10" /></Icon>;
+
+/* ---- error boundary so a bug shows a message instead of an infinite spinner ---- */
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error("Yardage Book crashed:", error, info); }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: "40px 20px", fontFamily: "system-ui, sans-serif", color: "#eee8d8", background: "#101d16", minHeight: "100vh" }}>
+          <div style={{ fontWeight: 700, fontSize: 17, marginBottom: 8 }}>Something went wrong</div>
+          <div style={{ fontSize: 13, color: "#9fb2a1", marginBottom: 14, lineHeight: 1.5 }}>
+            The app hit an error and couldn't continue. Details below — screenshot this and share it if you need help fixing it.
+          </div>
+          <pre style={{ fontSize: 11, color: "#bd5b3c", background: "#182a20", padding: 12, borderRadius: 8, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+            {String(this.state.error && (this.state.error.stack || this.state.error.message || this.state.error))}
+          </pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 
 /* =========================================================================
@@ -385,6 +404,127 @@ function computeSgProxy(clubStats) {
 }
 
 /* =========================================================================
+   CHART PRIMITIVES — hand-built, no external chart library. Keeps the app
+   dependency-light (good for an offline tool) and lets the visuals stay
+   true to the yardage-book aesthetic rather than a generic chart default.
+   ========================================================================= */
+function niceTicks(min, max, count) {
+  const ticks = [];
+  for (let i = 0; i <= count; i++) ticks.push(min + ((max - min) * i) / count);
+  return ticks;
+}
+
+// Horizontal bar list — one row per item, value bar as a filled track.
+function BarListChart({ data, valueKey, labelKey, colorFn, formatValue }) {
+  const max = Math.max(1, ...data.map((d) => Math.abs(d[valueKey])));
+  return (
+    <div className="barlist">
+      {data.map((d, i) => {
+        const val = d[valueKey];
+        const pct = Math.max(3, (Math.abs(val) / max) * 100);
+        const color = colorFn ? colorFn(d, i) : COLORS.gold;
+        return (
+          <div className="barlist-row" key={i}>
+            <div className="barlist-label">{d[labelKey]}</div>
+            <div className="barlist-track">
+              <div className="barlist-fill" style={{ width: `${pct}%`, background: color }} />
+            </div>
+            <div className="barlist-value">{formatValue ? formatValue(d) : val}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Horizontal diverging bar chart — bars grow left (negative) or right
+// (positive) from a center zero line. Used for the strokes-gained proxy.
+function DivergingBarChart({ data, valueKey, labelKey, formatValue }) {
+  const max = Math.max(0.05, ...data.map((d) => Math.abs(d[valueKey])));
+  return (
+    <div className="divbar">
+      {data.map((d, i) => {
+        const val = d[valueKey];
+        const pct = (Math.abs(val) / max) * 50;
+        const positive = val >= 0;
+        const color = positive ? COLORS.teal : COLORS.rust;
+        return (
+          <div className="divbar-row" key={i}>
+            <div className="divbar-label">{d[labelKey]}</div>
+            <div className="divbar-track">
+              <div className="divbar-center" />
+              <div className="divbar-fill" style={{ width: `${pct}%`, background: color, left: positive ? "50%" : `${50 - pct}%` }} />
+            </div>
+            <div className="divbar-value" style={{ color }}>{formatValue ? formatValue(d) : val}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Simple line trend (shots per session).
+function LineTrend({ data, valueKey, labelKey }) {
+  const W = 300, H = 120, padTop = 10, padBottom = 10;
+  const values = data.map((d) => d[valueKey]);
+  const max = Math.max(1, ...values);
+  const stepX = data.length > 1 ? W / (data.length - 1) : 0;
+  const points = data.map((d, i) => ({
+    x: data.length > 1 ? i * stepX : W / 2,
+    y: padTop + (H - padTop - padBottom) * (1 - d[valueKey] / max),
+  }));
+  const polyPoints = points.map((p) => `${p.x},${p.y}`).join(" ");
+  return (
+    <div>
+      <div style={{ width: "100%", aspectRatio: `${W} / ${H}` }}>
+        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height="100%">
+          <polyline points={polyPoints} fill="none" stroke={COLORS.gold} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+          {points.map((p, i) => <circle key={i} cx={p.x} cy={p.y} r="3.2" fill={COLORS.gold} />)}
+        </svg>
+      </div>
+      <div className="sparkline-labels">
+        {data.map((d, i) => <span key={i}>{d[labelKey]}</span>)}
+      </div>
+    </div>
+  );
+}
+
+// The signature "looking downrange" dispersion plot.
+function DispersionSVG({ points, maxOffline, maxCarry }) {
+  const W = 320, H = 340, marginX = 34, marginTop = 14, marginBottom = 30;
+  const plotW = W - marginX * 2, plotH = H - marginTop - marginBottom;
+  const xScale = (x) => marginX + ((x + maxOffline) / (2 * maxOffline)) * plotW;
+  const yScale = (y) => marginTop + plotH - (y / maxCarry) * plotH;
+  const carryTicks = niceTicks(0, maxCarry, 4);
+  return (
+    <div style={{ width: "100%", aspectRatio: `${W} / ${H}` }}>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height="100%">
+        <defs>
+          <linearGradient id="fairwayFade" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#1c3324" />
+            <stop offset="100%" stopColor="#132419" />
+          </linearGradient>
+        </defs>
+        <rect x={marginX} y={marginTop} width={plotW} height={plotH} fill="url(#fairwayFade)" rx="6" />
+        {carryTicks.map((t, i) => (
+          <g key={i}>
+            <line x1={marginX} x2={marginX + plotW} y1={yScale(t)} y2={yScale(t)} stroke={COLORS.lineSoft} strokeWidth="1" />
+            <text x={marginX - 6} y={yScale(t)} fill={COLORS.textFaint} fontSize="9" textAnchor="end" dominantBaseline="middle">{Math.round(t)}</text>
+          </g>
+        ))}
+        <line x1={xScale(0)} x2={xScale(0)} y1={marginTop} y2={marginTop + plotH} stroke={COLORS.gold} strokeWidth="1.5" strokeDasharray="3 5" />
+        {points.map((p, i) => {
+          const color = familyColor(p.fam);
+          const r = p.big ? 5.5 : 3.8;
+          return <circle key={i} cx={xScale(p.x)} cy={yScale(p.y)} r={r} fill={color} fillOpacity={p.big ? 0.95 : 0.75} stroke={p.big ? COLORS.text : "none"} strokeWidth={p.big ? 1 : 0} />;
+        })}
+        <text x={W / 2} y={H - 8} fill={COLORS.textFaint} fontSize="9.5" textAnchor="middle">offline (y) · dashed line = target</text>
+      </svg>
+    </div>
+  );
+}
+
+/* =========================================================================
    UI PRIMITIVES
    ========================================================================= */
 function Chip({ active, onClick, children }) {
@@ -684,7 +824,7 @@ function OverviewTab({ shots, allShots, sessions, clubStats, insights, onGoInsig
 
   const sessionChartData = useMemo(() => {
     return sessions.slice(0, 10).reverse().map((s) => ({
-      label: fmtDate(s.start),
+      label: new Date(s.start).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
       shots: s.shots.length,
     }));
   }, [sessions]);
@@ -717,15 +857,7 @@ function OverviewTab({ shots, allShots, sessions, clubStats, insights, onGoInsig
       {sessionChartData.length > 1 && (
         <div className="card">
           <div className="card-title">Shots per session</div>
-          <ResponsiveContainer width="100%" height={140}>
-            <LineChart data={sessionChartData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-              <CartesianGrid stroke={COLORS.lineSoft} vertical={false} />
-              <XAxis dataKey="label" tick={{ fill: COLORS.textFaint, fontSize: 10 }} axisLine={{ stroke: COLORS.line }} tickLine={false} />
-              <YAxis tick={{ fill: COLORS.textFaint, fontSize: 10 }} axisLine={false} tickLine={false} width={26} />
-              <Tooltip contentStyle={tooltipStyle} labelStyle={{ color: COLORS.text }} />
-              <Line type="monotone" dataKey="shots" stroke={COLORS.gold} strokeWidth={2} dot={{ r: 3, fill: COLORS.gold }} />
-            </LineChart>
-          </ResponsiveContainer>
+          <LineTrend data={sessionChartData} valueKey="shots" labelKey="label" />
         </div>
       )}
 
@@ -762,19 +894,13 @@ function BagTab({ clubStats }) {
     <div className="tab-pane">
       <div className="card">
         <div className="card-title">Yardage ladder — avg carry</div>
-        <ResponsiveContainer width="100%" height={Math.max(160, data.length * 42)}>
-          <BarChart data={data} layout="vertical" margin={{ top: 4, right: 24, left: 4, bottom: 4 }}>
-            <CartesianGrid stroke={COLORS.lineSoft} horizontal={false} />
-            <XAxis type="number" tick={{ fill: COLORS.textFaint, fontSize: 10 }} axisLine={{ stroke: COLORS.line }} tickLine={false} />
-            <YAxis type="category" dataKey="name" tick={{ fill: COLORS.text, fontSize: 11.5 }} axisLine={false} tickLine={false} width={68} />
-            <Tooltip
-              contentStyle={tooltipStyle}
-              labelStyle={{ color: COLORS.text }}
-              formatter={(val, name, props) => [`${val}y (range ${props.payload.range[0]}–${props.payload.range[1]}y)`, "Avg carry"]}
-            />
-            <Bar dataKey="carry" radius={[0, 4, 4, 0]} fill={COLORS.gold} maxBarSize={20} />
-          </BarChart>
-        </ResponsiveContainer>
+        <BarListChart
+          data={data}
+          valueKey="carry"
+          labelKey="name"
+          colorFn={() => COLORS.gold}
+          formatValue={(d) => `${d.carry}y`}
+        />
       </div>
 
       <div className="card" style={{ padding: 0 }}>
@@ -831,31 +957,7 @@ function DispersionTab({ clubStats, dispersionClub, setDispersionClub, available
       {cs && (
         <div className="card range-card">
           <div className="card-title">{clubDisplayName(cs.club)} — looking downrange</div>
-          <ResponsiveContainer width="100%" height={340}>
-            <ScatterChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
-              <defs>
-                <linearGradient id="fairwayFade" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#1c3324" />
-                  <stop offset="100%" stopColor="#132419" />
-                </linearGradient>
-              </defs>
-              <ReferenceArea x1={-maxOffline} x2={maxOffline} y1={0} y2={maxCarry} fill="url(#fairwayFade)" />
-              <CartesianGrid stroke={COLORS.lineSoft} />
-              <XAxis type="number" dataKey="x" domain={[-maxOffline, maxOffline]} tick={{ fill: COLORS.textFaint, fontSize: 10 }} axisLine={{ stroke: COLORS.line }} tickLine={false} label={{ value: "offline (y)", position: "insideBottom", fill: COLORS.textFaint, fontSize: 10, dy: 12 }} />
-              <YAxis type="number" dataKey="y" domain={[0, maxCarry]} tick={{ fill: COLORS.textFaint, fontSize: 10 }} axisLine={{ stroke: COLORS.line }} tickLine={false} width={38} />
-              <ReferenceLine x={0} stroke={COLORS.gold} strokeDasharray="3 5" strokeWidth={1.5} />
-              <Tooltip
-                cursor={{ stroke: COLORS.line }}
-                contentStyle={tooltipStyle}
-                formatter={(val, name, props) => {
-                  if (name === "y") return [`${fmt1(props.payload.y)}y carry`, "Carry"];
-                  return [`${fmt1(props.payload.x)}y`, "Offline"];
-                }}
-                labelFormatter={() => ""}
-              />
-              <Scatter data={points} shape={(props) => <DotShape {...props} />} />
-            </ScatterChart>
-          </ResponsiveContainer>
+          <DispersionSVG points={points} maxOffline={maxOffline} maxCarry={maxCarry} />
           <div className="legend-row">
             <LegendDot color={COLORS.teal} label="Left miss" />
             <LegendDot color={COLORS.gold} label="Straight" />
@@ -872,11 +974,6 @@ function DispersionTab({ clubStats, dispersionClub, setDispersionClub, available
   );
 }
 
-function DotShape({ cx, cy, payload }) {
-  const color = familyColor(payload.fam);
-  const r = payload.big ? 5.5 : 3.8;
-  return <circle cx={cx} cy={cy} r={r} fill={color} fillOpacity={payload.big ? 0.95 : 0.75} stroke={payload.big ? COLORS.text : "none"} strokeWidth={payload.big ? 1 : 0} />;
-}
 function LegendDot({ color, label }) {
   return <div className="legend-dot"><span style={{ background: color }} />{label}</div>;
 }
@@ -923,17 +1020,13 @@ function MissesTab({ shots, clubStats }) {
 
       <div className="card">
         <div className="card-title">Shot shapes, most to least common</div>
-        <ResponsiveContainer width="100%" height={Math.max(140, tally.length * 30)}>
-          <BarChart data={tally} layout="vertical" margin={{ top: 4, right: 20, left: 4, bottom: 4 }}>
-            <CartesianGrid stroke={COLORS.lineSoft} horizontal={false} />
-            <XAxis type="number" tick={{ fill: COLORS.textFaint, fontSize: 10 }} axisLine={{ stroke: COLORS.line }} tickLine={false} allowDecimals={false} />
-            <YAxis type="category" dataKey="name" tick={{ fill: COLORS.text, fontSize: 10.5 }} axisLine={false} tickLine={false} width={100} />
-            <Tooltip contentStyle={tooltipStyle} formatter={(v) => [v, "Shots"]} labelStyle={{ color: COLORS.text }} />
-            <Bar dataKey="count" radius={[0, 4, 4, 0]} maxBarSize={16}>
-              {tally.map((entry, i) => <Cell key={i} fill={familyColor(entry.fam)} fillOpacity={0.85} />)}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
+        <BarListChart
+          data={tally}
+          valueKey="count"
+          labelKey="name"
+          colorFn={(d) => familyColor(d.fam)}
+          formatValue={(d) => d.count}
+        />
       </div>
 
       <div className="card" style={{ padding: 0 }}>
@@ -1002,18 +1095,12 @@ function InsightsTab({ insights, sgProxy }) {
               This is a rough, illustrative proxy — not true Strokes Gained. It compares your lateral miss distance to a rough, publicly-known PGA Tour average proximity-to-target by distance, per shot, and converts the gap to an approximate stroke value. It ignores actual on-course outcomes, putting, and doesn't know your real target distance — treat it as directional, not authoritative.
             </div>
           )}
-          <ResponsiveContainer width="100%" height={Math.max(120, sgProxy.length * 34)}>
-            <BarChart data={sgProxy.map((s) => ({ name: clubDisplayName(s.club), val: Math.round(s.avgSg * 100) / 100 }))} layout="vertical" margin={{ top: 4, right: 24, left: 4, bottom: 4 }}>
-              <CartesianGrid stroke={COLORS.lineSoft} horizontal={false} />
-              <XAxis type="number" tick={{ fill: COLORS.textFaint, fontSize: 10 }} axisLine={{ stroke: COLORS.line }} tickLine={false} />
-              <YAxis type="category" dataKey="name" tick={{ fill: COLORS.text, fontSize: 11 }} axisLine={false} tickLine={false} width={64} />
-              <ReferenceLine x={0} stroke={COLORS.line} />
-              <Tooltip contentStyle={tooltipStyle} formatter={(v) => [fmtSigned1(v), "Approx SG / shot"]} labelStyle={{ color: COLORS.text }} />
-              <Bar dataKey="val" radius={[0, 4, 4, 0]} maxBarSize={16}>
-                {sgProxy.map((s, i) => <Cell key={i} fill={s.avgSg >= 0 ? COLORS.teal : COLORS.rust} fillOpacity={0.85} />)}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+          <DivergingBarChart
+            data={sgProxy.map((s) => ({ name: clubDisplayName(s.club), val: Math.round(s.avgSg * 100) / 100 }))}
+            valueKey="val"
+            labelKey="name"
+            formatValue={(d) => fmtSigned1(d.val)}
+          />
         </div>
       )}
     </div>
@@ -1062,14 +1149,6 @@ function DataPanel({ onClose, onUpload, onExport, onImport, sessions, onDeleteSe
 function NoDataNote() {
   return <div className="card"><div className="card-title" style={{ marginBottom: 0 }}>No shots match this filter</div></div>;
 }
-
-const tooltipStyle = {
-  background: COLORS.surfaceRaised,
-  border: `1px solid ${COLORS.line}`,
-  borderRadius: 8,
-  fontSize: 12,
-  color: COLORS.text,
-};
 
 /* =========================================================================
    GLOBAL STYLE
@@ -1139,6 +1218,24 @@ function GlobalStyle() {
       .stat-strip > div { display: flex; flex-direction: column; align-items: center; }
       .stat-num { font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 600; color: ${COLORS.text}; }
       .stat-lbl { font-size: 10px; color: ${COLORS.textFaint}; margin-top: 2px; }
+
+      .barlist { display: flex; flex-direction: column; gap: 10px; }
+      .barlist-row { display: grid; grid-template-columns: 60px 1fr 54px; align-items: center; gap: 8px; }
+      .barlist-label { font-size: 11.5px; color: ${COLORS.text}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .barlist-track { height: 10px; background: ${COLORS.bg}; border-radius: 100px; border: 1px solid ${COLORS.lineSoft}; overflow: hidden; }
+      .barlist-fill { height: 100%; border-radius: 100px; }
+      .barlist-value { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: ${COLORS.textMuted}; text-align: right; white-space: nowrap; }
+
+      .divbar { display: flex; flex-direction: column; gap: 10px; }
+      .divbar-row { display: grid; grid-template-columns: 56px 1fr 50px; align-items: center; gap: 8px; }
+      .divbar-label { font-size: 11.5px; color: ${COLORS.text}; }
+      .divbar-track { position: relative; height: 10px; background: ${COLORS.bg}; border-radius: 100px; border: 1px solid ${COLORS.lineSoft}; overflow: hidden; }
+      .divbar-center { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: ${COLORS.line}; }
+      .divbar-fill { position: absolute; top: 0; bottom: 0; border-radius: 100px; }
+      .divbar-value { font-family: 'JetBrains Mono', monospace; font-size: 11px; text-align: right; white-space: nowrap; }
+
+      .sparkline-labels { display: flex; justify-content: space-between; margin-top: 4px; }
+      .sparkline-labels span { font-size: 9px; color: ${COLORS.textFaint}; }
 
       .data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
       .data-table th { text-align: left; font-size: 10.5px; color: ${COLORS.textFaint}; font-weight: 500; padding: 6px 14px; border-bottom: 1px solid ${COLORS.lineSoft}; }
@@ -1225,5 +1322,8 @@ function GlobalStyle() {
 }
 
 const rootEl = document.getElementById("root");
-ReactDOM.createRoot(rootEl).render(<App />);
-
+ReactDOM.createRoot(rootEl).render(
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>
+);

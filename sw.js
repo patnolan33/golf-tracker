@@ -1,4 +1,4 @@
-const CACHE_NAME = "yardage-book-v1";
+const CACHE_NAME = "yardage-book-v2";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -9,8 +9,6 @@ const APP_SHELL = [
   "./icon-maskable-512.png",
   "https://unpkg.com/react@18/umd/react.production.min.js",
   "https://unpkg.com/react-dom@18/umd/react-dom.production.min.js",
-  "https://unpkg.com/prop-types/prop-types.min.js",
-  "https://unpkg.com/recharts/umd/Recharts.js",
   "https://unpkg.com/papaparse@5.4.1/papaparse.min.js",
   "https://unpkg.com/@babel/standalone/babel.min.js",
 ];
