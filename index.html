@@ -48,25 +48,30 @@
 </div>
 
 <script>
-  // If a required library never showed up, surface a visible message instead
-  // of leaving the "Loading…" placeholder forever.
-  window.addEventListener("load", () => {
-    setTimeout(() => {
-      const missing = [];
-      if (typeof React === "undefined") missing.push("React");
-      if (typeof ReactDOM === "undefined") missing.push("ReactDOM");
-      if (typeof Papa === "undefined") missing.push("PapaParse");
-      if (typeof Babel === "undefined") missing.push("Babel");
-      if (missing.length) {
-        document.getElementById("root").style.display = "none";
-        document.getElementById("boot-error").style.display = "block";
-        document.getElementById("boot-error-detail").textContent = "Missing: " + missing.join(", ");
-      }
-    }, 4000);
-  });
+  // Manually invoke Babel (classic JSX runtime) instead of the automatic
+  // <script type="text/babel"> scanner — the automatic runtime otherwise
+  // injects an `import` statement for the JSX helper, which breaks in a
+  // plain (non-module) script.
+  (async function () {
+    try {
+      const res = await fetch("./app.js");
+      if (!res.ok) throw new Error("app.js fetch failed: " + res.status);
+      const code = await res.text();
+      const output = Babel.transform(code, {
+        presets: [["react", { runtime: "classic" }]],
+        filename: "app.js",
+      }).code;
+      const script = document.createElement("script");
+      script.textContent = output;
+      document.body.appendChild(script);
+    } catch (err) {
+      document.getElementById("root").style.display = "none";
+      document.getElementById("boot-error").style.display = "block";
+      document.getElementById("boot-error-detail").textContent =
+        String(err && (err.stack || err.message || err));
+    }
+  })();
 </script>
-
-<script type="text/babel" data-presets="react" src="./app.js"></script>
 
 <script>
   if ("serviceWorker" in navigator) {
