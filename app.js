@@ -46,6 +46,7 @@ const ChevronRight = (p) => <Icon {...p}><path d="M9 18l6-6-6-6" /></Icon>;
 const X = (p) => <Icon {...p}><path d="M6 6l12 12" /><path d="M18 6L6 18" /></Icon>;
 const Flag = (p) => <Icon {...p}><path d="M6 3v18" /><path d="M6 4h11l-2.5 4L17 12H6" /></Icon>;
 const Target = (p) => <Icon {...p}><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="4" /><circle cx="12" cy="12" r="0.7" fill="currentColor" /></Icon>;
+const TrendingUp = (p) => <Icon {...p}><path d="M4 16l6-6 4 4 6-8" /><path d="M15 6h5v5" /></Icon>;
 const AlertCircle = (p) => <Icon {...p}><circle cx="12" cy="12" r="9" /><path d="M12 7v6" /><circle cx="12" cy="16.3" r="0.9" fill="currentColor" /></Icon>;
 const Compass = (p) => <Icon {...p}><circle cx="12" cy="12" r="9" /><path d="M15 9l-2 6-4 2 2-6z" /></Icon>;
 const BarChart3 = (p) => <Icon {...p}><path d="M4 20V10" /><path d="M12 20V4" /><path d="M20 20v-7" /></Icon>;
@@ -199,6 +200,83 @@ function tourProximityFt(distanceYds) {
   return 25;
 }
 
+// Rough, widely-cited angle-of-attack ranges by club category — actual
+// "ideal" varies by player and ball position; treat as a general guideline.
+function attackAngleIdeal(club) {
+  const cat = clubCategory(club);
+  if (cat === "Driver") return [0, 5];
+  if (cat === "Woods" || cat === "Hybrids") return [-2, 2];
+  if (cat === "Wedges") return [-6, -3];
+  return [-5, -2]; // irons
+}
+
+// Key swing-metric definitions for the Trends tab. Each has a getter and a
+// rough ideal range (varies by club where relevant) — all illustrative
+// reference points, not personalized targets.
+const METRICS = [
+  {
+    key: "faceToTarget", label: "Face Angle", unit: "°",
+    get: (s) => s.faceToTarget,
+    idealRange: () => [-2, 2],
+    desc: "Clubface direction relative to the target line at impact. Square (0°) starts the ball on line.",
+  },
+  {
+    key: "clubPath", label: "Club Path", unit: "°",
+    get: (s) => s.clubPath,
+    idealRange: () => [-2, 2],
+    desc: "Swing direction through impact relative to the target line. Near 0° for a neutral path.",
+  },
+  {
+    key: "faceToPath", label: "Face to Path", unit: "°",
+    get: (s) => s.faceToPath,
+    idealRange: () => [-2, 2],
+    desc: "Face angle relative to swing path — the main driver of curve. Bigger gaps mean more side-spin.",
+  },
+  {
+    key: "angleOfAttack", label: "Angle of Attack", unit: "°",
+    get: (s) => s.angleOfAttack,
+    idealRange: (club) => attackAngleIdeal(club),
+    desc: "Whether you strike down or up on the ball. Ideal range shifts by club — negative for irons/wedges, positive for driver.",
+  },
+  {
+    key: "smashFactor", label: "Smash Factor", unit: "",
+    get: (s) => (s.smashFactor > 0 ? s.smashFactor : null),
+    idealRange: (club) => { const t = smashTarget(club); return [t - 0.03, t + 0.15]; },
+    desc: "Ball speed ÷ club speed — a rough proxy for center-face contact quality.",
+  },
+  {
+    key: "tempoRatio", label: "Tempo Ratio", unit: ":1",
+    get: (s) => s.tempoRatio,
+    idealRange: () => [2.8, 3.2],
+    desc: "Backswing time ÷ downswing time. Many consistent ball-strikers cluster near 3:1.",
+  },
+];
+
+// Shared metric-stats computation used by both the Trends tab (per selected
+// club) and the Overview "swing check" card (scanning across clubs).
+function computeMetricStatsForClub(club, clubShots) {
+  return METRICS.map((m) => {
+    const vals = clubShots
+      .map((s) => ({ v: m.get(s), date: s.date, shot: s }))
+      .filter((d) => d.v != null && Number.isFinite(d.v))
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
+    if (!vals.length) return { ...m, hasData: false };
+    const range = m.idealRange(club);
+    const avg = mean(vals.map((d) => d.v));
+    const inRangeCount = vals.filter((d) => d.v >= range[0] && d.v <= range[1]).length;
+    const pctInRange = inRangeCount / vals.length;
+    const n = vals.length;
+    const third = Math.max(1, Math.floor(n / 3));
+    const center = (range[0] + range[1]) / 2;
+    const early = mean(vals.slice(0, third).map((d) => d.v));
+    const recent = mean(vals.slice(-third).map((d) => d.v));
+    const improving = n >= 4 && Math.abs(recent - center) < Math.abs(early - center) - 0.15;
+    const worsening = n >= 4 && Math.abs(recent - center) > Math.abs(early - center) + 0.15;
+    return { ...m, hasData: true, club, avg, range, pctInRange, points: vals, n, improving, worsening };
+  });
+}
+
+
 function mean(arr) { return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0; }
 function stdev(arr) {
   if (arr.length < 2) return 0;
@@ -209,11 +287,42 @@ function fmt1(n) { return (Math.round(n * 10) / 10).toFixed(1); }
 function fmt0(n) { return Math.round(n).toString(); }
 function fmtSigned1(n) { return (n >= 0 ? "+" : "") + fmt1(n); }
 
+// Trackman exports use the literal string "null" for untracked fields
+// (varies by radar/session type) — treat those as missing, not zero.
+function numOrNull(v) {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "string" && v.trim().toLowerCase() === "null") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 function fmtDate(d) {
   return new Date(d).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 function fmtDateTime(d) {
   return new Date(d).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+// Builds the generic key/value rows shown in the tap-for-detail sheet for
+// a single raw shot. Swing-metric rows only appear when the export
+// actually included that field.
+function shotDetailRows(shot) {
+  const rows = [
+    { label: "Carry", value: `${fmt1(shot.carry)}y` },
+    { label: "Total", value: `${fmt1(shot.total)}y` },
+    { label: "Offline", value: `${fmtSigned1(shot.offline)}y` },
+  ];
+  if (shot.clubSpeed) rows.push({ label: "Club Speed", value: `${fmt1(shot.clubSpeed)} mph` });
+  if (shot.ballSpeed) rows.push({ label: "Ball Speed", value: `${fmt1(shot.ballSpeed)} mph` });
+  if (shot.smashFactor) rows.push({ label: "Smash Factor", value: fmt1(shot.smashFactor) });
+  if (shot.launchAngle) rows.push({ label: "Launch Angle", value: `${fmt1(shot.launchAngle)}°` });
+  if (shot.faceToTarget != null) rows.push({ label: "Face Angle", value: `${fmtSigned1(shot.faceToTarget)}°` });
+  if (shot.clubPath != null) rows.push({ label: "Club Path", value: `${fmtSigned1(shot.clubPath)}°` });
+  if (shot.faceToPath != null) rows.push({ label: "Face to Path", value: `${fmtSigned1(shot.faceToPath)}°` });
+  if (shot.angleOfAttack != null) rows.push({ label: "Angle of Attack", value: `${fmtSigned1(shot.angleOfAttack)}°` });
+  if (shot.tempoRatio != null) rows.push({ label: "Tempo Ratio", value: `${fmt1(shot.tempoRatio)}:1` });
+  if (shot.peakHeight) rows.push({ label: "Peak Height", value: `${fmt1(shot.peakHeight)}y` });
+  return rows;
 }
 
 /* ---------- CSV parsing ---------- */
@@ -243,6 +352,18 @@ function parseCsvText(text) {
       totalScore: row.totalScore != null ? Number(row.totalScore) : null,
       landingAngle: Number(row.landingAngle) || 0,
       peakHeight: Number(row.peakHeight) || 0,
+      faceToTarget: numOrNull(row.faceToTarget),
+      clubPath: numOrNull(row.clubPath),
+      faceToPath: numOrNull(row.faceToPath),
+      angleOfAttack: numOrNull(row.angleOfAttack),
+      backswingTime: numOrNull(row.backswingTime),
+      downswingTime: numOrNull(row.downswingTime),
+      tempoRatio: (() => {
+        const t = numOrNull(row.tempo);
+        if (t != null) return t;
+        const bs = numOrNull(row.backswingTime), ds = numOrNull(row.downswingTime);
+        return bs != null && ds != null && ds > 0 ? bs / ds : null;
+      })(),
     });
   }
   return shots;
@@ -415,7 +536,8 @@ function niceTicks(min, max, count) {
 }
 
 // Horizontal bar list — one row per item, value bar as a filled track.
-function BarListChart({ data, valueKey, labelKey, colorFn, formatValue }) {
+// onRowClick(d, i) is optional; when passed, rows become tappable for detail.
+function BarListChart({ data, valueKey, labelKey, colorFn, formatValue, onRowClick }) {
   const max = Math.max(1, ...data.map((d) => Math.abs(d[valueKey])));
   return (
     <div className="barlist">
@@ -423,14 +545,15 @@ function BarListChart({ data, valueKey, labelKey, colorFn, formatValue }) {
         const val = d[valueKey];
         const pct = Math.max(3, (Math.abs(val) / max) * 100);
         const color = colorFn ? colorFn(d, i) : COLORS.gold;
+        const Row = onRowClick ? "button" : "div";
         return (
-          <div className="barlist-row" key={i}>
+          <Row className="barlist-row" key={i} onClick={onRowClick ? () => onRowClick(d, i) : undefined}>
             <div className="barlist-label">{d[labelKey]}</div>
             <div className="barlist-track">
               <div className="barlist-fill" style={{ width: `${pct}%`, background: color }} />
             </div>
             <div className="barlist-value">{formatValue ? formatValue(d) : val}</div>
-          </div>
+          </Row>
         );
       })}
     </div>
@@ -439,7 +562,7 @@ function BarListChart({ data, valueKey, labelKey, colorFn, formatValue }) {
 
 // Horizontal diverging bar chart — bars grow left (negative) or right
 // (positive) from a center zero line. Used for the strokes-gained proxy.
-function DivergingBarChart({ data, valueKey, labelKey, formatValue }) {
+function DivergingBarChart({ data, valueKey, labelKey, formatValue, onRowClick }) {
   const max = Math.max(0.05, ...data.map((d) => Math.abs(d[valueKey])));
   return (
     <div className="divbar">
@@ -448,49 +571,26 @@ function DivergingBarChart({ data, valueKey, labelKey, formatValue }) {
         const pct = (Math.abs(val) / max) * 50;
         const positive = val >= 0;
         const color = positive ? COLORS.teal : COLORS.rust;
+        const Row = onRowClick ? "button" : "div";
         return (
-          <div className="divbar-row" key={i}>
+          <Row className="divbar-row" key={i} onClick={onRowClick ? () => onRowClick(d, i) : undefined}>
             <div className="divbar-label">{d[labelKey]}</div>
             <div className="divbar-track">
               <div className="divbar-center" />
               <div className="divbar-fill" style={{ width: `${pct}%`, background: color, left: positive ? "50%" : `${50 - pct}%` }} />
             </div>
             <div className="divbar-value" style={{ color }}>{formatValue ? formatValue(d) : val}</div>
-          </div>
+          </Row>
         );
       })}
     </div>
   );
 }
 
-// Simple line trend (shots per session).
-function LineTrend({ data, valueKey, labelKey }) {
-  const W = 300, H = 120, padTop = 10, padBottom = 10;
-  const values = data.map((d) => d[valueKey]);
-  const max = Math.max(1, ...values);
-  const stepX = data.length > 1 ? W / (data.length - 1) : 0;
-  const points = data.map((d, i) => ({
-    x: data.length > 1 ? i * stepX : W / 2,
-    y: padTop + (H - padTop - padBottom) * (1 - d[valueKey] / max),
-  }));
-  const polyPoints = points.map((p) => `${p.x},${p.y}`).join(" ");
-  return (
-    <div>
-      <div style={{ width: "100%", aspectRatio: `${W} / ${H}` }}>
-        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height="100%">
-          <polyline points={polyPoints} fill="none" stroke={COLORS.gold} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-          {points.map((p, i) => <circle key={i} cx={p.x} cy={p.y} r="3.2" fill={COLORS.gold} />)}
-        </svg>
-      </div>
-      <div className="sparkline-labels">
-        {data.map((d, i) => <span key={i}>{d[labelKey]}</span>)}
-      </div>
-    </div>
-  );
-}
 
-// The signature "looking downrange" dispersion plot.
-function DispersionSVG({ points, maxOffline, maxCarry }) {
+// The signature "looking downrange" dispersion plot. onPointClick(shot) is
+// optional; each dot gets an enlarged invisible hit-area for easy tapping.
+function DispersionSVG({ points, maxOffline, maxCarry, onPointClick }) {
   const W = 320, H = 340, marginX = 34, marginTop = 14, marginBottom = 30;
   const plotW = W - marginX * 2, plotH = H - marginTop - marginBottom;
   const xScale = (x) => marginX + ((x + maxOffline) / (2 * maxOffline)) * plotW;
@@ -516,9 +616,96 @@ function DispersionSVG({ points, maxOffline, maxCarry }) {
         {points.map((p, i) => {
           const color = familyColor(p.fam);
           const r = p.big ? 5.5 : 3.8;
-          return <circle key={i} cx={xScale(p.x)} cy={yScale(p.y)} r={r} fill={color} fillOpacity={p.big ? 0.95 : 0.75} stroke={p.big ? COLORS.text : "none"} strokeWidth={p.big ? 1 : 0} />;
+          return (
+            <g key={i} onClick={onPointClick ? () => onPointClick(p.shot) : undefined} style={{ cursor: onPointClick ? "pointer" : "default" }}>
+              {onPointClick && <circle cx={xScale(p.x)} cy={yScale(p.y)} r={r + 7} fill="transparent" />}
+              <circle cx={xScale(p.x)} cy={yScale(p.y)} r={r} fill={color} fillOpacity={p.big ? 0.95 : 0.75} stroke={p.big ? COLORS.text : "none"} strokeWidth={p.big ? 1 : 0} />
+            </g>
+          );
         })}
-        <text x={W / 2} y={H - 8} fill={COLORS.textFaint} fontSize="9.5" textAnchor="middle">offline (y) · dashed line = target</text>
+        <text x={W / 2} y={H - 8} fill={COLORS.textFaint} fontSize="9.5" textAnchor="middle">offline (y) · dashed line = target · tap a dot for details</text>
+      </svg>
+    </div>
+  );
+}
+
+// Metric-over-time chart with a shaded "ideal range" band, optional raw
+// shot dots, and an optional smoothed (moving-average) trend line — the
+// core view for the Trends tab. X-axis is chronological shot order (not
+// true calendar spacing) with a few real date labels along the bottom.
+function MetricTrendSVG({ points, idealRange, unit, showRaw, showTrend, onPointClick }) {
+  const W = 340, H = 240, padTop = 16, padBottom = 34, padLeft = 42, padRight = 14;
+  const plotW = W - padLeft - padRight, plotH = H - padTop - padBottom;
+  const values = points.map((p) => p.v);
+  const dataMin = Math.min(...values, idealRange[0]);
+  const dataMax = Math.max(...values, idealRange[1]);
+  const pad = Math.max(0.5, (dataMax - dataMin) * 0.18);
+  const yMin = dataMin - pad, yMax = dataMax + pad;
+  const xScale = (i) => padLeft + (points.length > 1 ? (i / (points.length - 1)) * plotW : plotW / 2);
+  const yScale = (v) => padTop + plotH - ((v - yMin) / (yMax - yMin || 1)) * plotH;
+  const bandY1 = yScale(idealRange[1]);
+  const bandY2 = yScale(idealRange[0]);
+  const zeroInRange = yMin <= 0 && yMax >= 0;
+
+  const yTicks = niceTicks(yMin, yMax, 4);
+
+  // Smoothed trend line: centered moving average, window scales with n.
+  const windowSize = Math.max(3, Math.min(9, Math.round(points.length / 5)));
+  const trendPoints = points.map((p, i) => {
+    const lo = Math.max(0, i - Math.floor(windowSize / 2));
+    const hi = Math.min(points.length, i + Math.ceil(windowSize / 2));
+    return { i, v: mean(points.slice(lo, hi).map((d) => d.v)) };
+  });
+  const trendLine = trendPoints.map((p) => `${xScale(p.i)},${yScale(p.v)}`).join(" ");
+  const rawLine = points.map((p, i) => `${xScale(i)},${yScale(p.v)}`).join(" ");
+
+  // A handful of real date labels spread across the x-axis (not one per shot).
+  const xTickCount = Math.min(4, points.length);
+  const xTickIdxs = Array.from(new Set(
+    xTickCount <= 1
+      ? [0]
+      : Array.from({ length: xTickCount }, (_, k) => Math.round((k * (points.length - 1)) / (xTickCount - 1)))
+  ));
+
+  return (
+    <div style={{ width: "100%", aspectRatio: `${W} / ${H}` }}>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height="100%">
+        <rect x={padLeft} y={bandY1} width={plotW} height={Math.max(1, bandY2 - bandY1)} fill={COLORS.teal} fillOpacity="0.14" />
+        <line x1={padLeft} x2={padLeft + plotW} y1={bandY1} y2={bandY1} stroke={COLORS.teal} strokeDasharray="2 4" strokeWidth="1" />
+        <line x1={padLeft} x2={padLeft + plotW} y1={bandY2} y2={bandY2} stroke={COLORS.teal} strokeDasharray="2 4" strokeWidth="1" />
+        {zeroInRange && <line x1={padLeft} x2={padLeft + plotW} y1={yScale(0)} y2={yScale(0)} stroke={COLORS.lineSoft} strokeWidth="1" />}
+
+        {yTicks.map((t, i) => (
+          <g key={i}>
+            <line x1={padLeft} x2={padLeft + plotW} y1={yScale(t)} y2={yScale(t)} stroke={COLORS.lineSoft} strokeWidth="0.5" opacity="0.5" />
+            <text x={padLeft - 6} y={yScale(t)} fill={COLORS.textFaint} fontSize="8.5" textAnchor="end" dominantBaseline="middle">{fmt1(t)}{unit}</text>
+          </g>
+        ))}
+
+        {showRaw && (
+          <>
+            <polyline points={rawLine} fill="none" stroke={COLORS.line} strokeWidth="1" opacity="0.45" />
+            {points.map((p, i) => {
+              const inRange = p.v >= idealRange[0] && p.v <= idealRange[1];
+              return (
+                <g key={i} onClick={onPointClick ? () => onPointClick(p) : undefined} style={{ cursor: onPointClick ? "pointer" : "default" }}>
+                  {onPointClick && <circle cx={xScale(i)} cy={yScale(p.v)} r="9" fill="transparent" />}
+                  <circle cx={xScale(i)} cy={yScale(p.v)} r="3" fill={inRange ? COLORS.teal : COLORS.rust} fillOpacity="0.85" />
+                </g>
+              );
+            })}
+          </>
+        )}
+
+        {showTrend && points.length >= 3 && (
+          <polyline points={trendLine} fill="none" stroke={COLORS.gold} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+        )}
+
+        {xTickIdxs.map((idx, k) => (
+          <text key={k} x={xScale(idx)} y={H - 10} fill={COLORS.textFaint} fontSize="8.5" textAnchor="middle">
+            {new Date(points[idx].date).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+          </text>
+        ))}
       </svg>
     </div>
   );
@@ -572,7 +759,10 @@ function App() {
   const [category, setCategory] = useState("All");
   const [club, setClub] = useState("All");
   const [dispersionClub, setDispersionClub] = useState(null);
+  const [trendsClub, setTrendsClub] = useState(null);
+  const [trendsMetric, setTrendsMetric] = useState("faceToTarget");
   const [panelOpen, setPanelOpen] = useState(false);
+  const [detail, setDetail] = useState(null);
   const [toast, setToast] = useState(null);
   const fileInputRef = useRef(null);
   const backupInputRef = useRef(null);
@@ -606,6 +796,8 @@ function App() {
     setToast({ type, msg });
     setTimeout(() => setToast(null), 3200);
   };
+
+  const showDetail = useCallback((title, subtitle, rows) => setDetail({ title, subtitle, rows }), []);
 
   const mergeShots = useCallback((incoming) => {
     setShots((prev) => {
@@ -708,7 +900,8 @@ function App() {
 
   useEffect(() => {
     if (!dispersionClub && availableClubs.length) setDispersionClub(availableClubs[0]);
-  }, [availableClubs, dispersionClub]);
+    if (!trendsClub && availableClubs.length) setTrendsClub(availableClubs[0]);
+  }, [availableClubs, dispersionClub, trendsClub]);
 
   if (!loaded) {
     return <div className="app-shell"><GlobalStyle /><div className="boot">Loading your yardage book…</div></div>;
@@ -731,7 +924,7 @@ function App() {
         <EmptyState onUploadClick={() => fileInputRef.current && fileInputRef.current.click()} />
       ) : (
         <main className="main">
-          {(availableCategories.length > 1 || availableClubs.length > 1) && tab !== "insights" && (
+          {(availableCategories.length > 1 || availableClubs.length > 1) && tab !== "insights" && tab !== "trends" && tab !== "overview" && (
             <div className="filter-row">
               <div className="chip-row">
                 <Chip active={category === "All"} onClick={() => { setCategory("All"); setClub("All"); }}>All</Chip>
@@ -751,19 +944,37 @@ function App() {
           )}
 
           {tab === "overview" && (
-            <OverviewTab shots={filteredShots} allShots={shots} sessions={sessionsAll} clubStats={clubStats} insights={insights} onGoInsights={() => setTab("insights")} />
+            <OverviewTab
+              shots={shots}
+              sessions={sessionsAll}
+              clubStats={allClubStats}
+              insights={insights}
+              onNavigate={setTab}
+            />
           )}
-          {tab === "bag" && <BagTab clubStats={clubStats} />}
+          {tab === "bag" && <BagTab clubStats={clubStats} onShowDetail={showDetail} />}
           {tab === "dispersion" && (
             <DispersionTab
               clubStats={clubStats}
               dispersionClub={dispersionClub}
               setDispersionClub={setDispersionClub}
               availableClubs={availableClubs}
+              onShowDetail={showDetail}
             />
           )}
-          {tab === "misses" && <MissesTab shots={filteredShots} clubStats={clubStats} />}
-          {tab === "insights" && <InsightsTab insights={insights} sgProxy={sgProxy} />}
+          {tab === "misses" && <MissesTab shots={filteredShots} clubStats={clubStats} onShowDetail={showDetail} />}
+          {tab === "insights" && <InsightsTab insights={insights} sgProxy={sgProxy} onShowDetail={showDetail} />}
+          {tab === "trends" && (
+            <TrendsTab
+              clubStats={allClubStats}
+              availableClubs={availableClubs}
+              trendsClub={trendsClub}
+              setTrendsClub={setTrendsClub}
+              trendsMetric={trendsMetric}
+              setTrendsMetric={setTrendsMetric}
+              onShowDetail={showDetail}
+            />
+          )}
         </main>
       )}
 
@@ -772,6 +983,7 @@ function App() {
         <TabButton icon={<BarChart3 size={19} />} label="Bag" active={tab === "bag"} onClick={() => setTab("bag")} />
         <TabButton icon={<Target size={19} />} label="Dispersion" active={tab === "dispersion"} onClick={() => setTab("dispersion")} />
         <TabButton icon={<Compass size={19} style={{ transform: "rotate(45deg)" }} />} label="Misses" active={tab === "misses"} onClick={() => setTab("misses")} />
+        <TabButton icon={<TrendingUp size={19} />} label="Trends" active={tab === "trends"} onClick={() => setTab("trends")} />
         <TabButton icon={<ClipboardList size={19} />} label="Insights" active={tab === "insights"} onClick={() => setTab("insights")} />
       </nav>
 
@@ -786,6 +998,8 @@ function App() {
           totalShots={shots.length}
         />
       )}
+
+      {detail && <DetailSheet title={detail.title} subtitle={detail.subtitle} rows={detail.rows} onClose={() => setDetail(null)} />}
 
       <input ref={fileInputRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={handleCsvFile} />
       <input ref={backupInputRef} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={handleImportBackup} />
@@ -804,32 +1018,71 @@ function TabButton({ icon, label, active, onClick }) {
   return (
     <button className="tab-btn" onClick={onClick} style={{ color: active ? COLORS.gold : COLORS.textFaint }}>
       {icon}
-      <span style={{ fontSize: 10.5, marginTop: 3, letterSpacing: "0.02em" }}>{label}</span>
+      <span style={{ fontSize: 9.5, marginTop: 3, letterSpacing: "0.01em" }}>{label}</span>
     </button>
   );
 }
 
 /* ---------------- Overview ---------------- */
-function OverviewTab({ shots, allShots, sessions, clubStats, insights, onGoInsights }) {
+function OverviewTab({ shots, sessions, clubStats, insights, onNavigate }) {
   const dateRange = useMemo(() => {
-    if (!allShots.length) return null;
-    const dates = allShots.map((s) => new Date(s.date).getTime());
+    if (!shots.length) return null;
+    const dates = shots.map((s) => new Date(s.date).getTime());
     return [new Date(Math.min(...dates)), new Date(Math.max(...dates))];
-  }, [allShots]);
+  }, [shots]);
 
   const mostPracticed = useMemo(() => {
     if (!clubStats.length) return null;
     return [...clubStats].sort((a, b) => b.count - a.count)[0];
   }, [clubStats]);
 
-  const sessionChartData = useMemo(() => {
-    return sessions.slice(0, 10).reverse().map((s) => ({
-      label: new Date(s.start).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
-      shots: s.shots.length,
-    }));
-  }, [sessions]);
+  const lastSession = sessions[0] || null;
+  const lastSessionStats = useMemo(() => {
+    if (!lastSession) return null;
+    const clubs = Array.from(new Set(lastSession.shots.map((s) => s.club)));
+    const byClub = {};
+    lastSession.shots.forEach((s) => { (byClub[s.club] = byClub[s.club] || []).push(s); });
+    const [primaryClub, primaryShots] = Object.entries(byClub).sort((a, b) => b[1].length - a[1].length)[0] || [null, []];
+    const carries = primaryShots.map((s) => s.carry).filter((n) => n > 0);
+    const bigMisses = primaryShots.filter((s) => isBigMiss(s.classification)).length;
+    const famCounts = {};
+    primaryShots.forEach((s) => { const f = missFamily(s.classification); famCounts[f] = (famCounts[f] || 0) + 1; });
+    const domFamEntry = Object.entries(famCounts).sort((a, b) => b[1] - a[1])[0];
+    return {
+      clubs, totalShots: lastSession.shots.length, primaryClub,
+      primaryCount: primaryShots.length,
+      avgCarry: mean(carries),
+      bigMissRate: primaryShots.length ? bigMisses / primaryShots.length : 0,
+      domFam: domFamEntry ? domFamEntry[0] : null,
+    };
+  }, [lastSession]);
 
-  const topIssue = insights[0];
+  const bagSnapshot = useMemo(() => {
+    return [...clubStats]
+      .filter((c) => c.avgCarry > 0)
+      .sort((a, b) => b.avgCarry - a.avgCarry)
+      .slice(0, 5)
+      .map((c) => ({ name: clubDisplayName(c.club), carry: Math.round(c.avgCarry), club: c.club }));
+  }, [clubStats]);
+
+  const missBias = useMemo(() => {
+    const families = shots.map((s) => missFamily(s.classification));
+    const n = families.length || 1;
+    const left = families.filter((f) => f === "left").length;
+    const right = families.filter((f) => f === "right").length;
+    return { left: left / n, right: right / n, straight: (n - left - right) / n };
+  }, [shots]);
+
+  const swingCheck = useMemo(() => {
+    const candidates = [];
+    clubStats.filter((c) => c.count >= 4).forEach((c) => {
+      computeMetricStatsForClub(c.club, c.shots)
+        .filter((m) => m.hasData && m.n >= 4)
+        .forEach((m) => candidates.push(m));
+    });
+    if (!candidates.length) return null;
+    return [...candidates].sort((a, b) => a.pctInRange - b.pctInRange)[0];
+  }, [clubStats]);
 
   return (
     <div className="tab-pane">
@@ -854,26 +1107,85 @@ function OverviewTab({ shots, allShots, sessions, clubStats, insights, onGoInsig
         </div>
       )}
 
-      {sessionChartData.length > 1 && (
+      {lastSession && lastSessionStats && (
         <div className="card">
-          <div className="card-title">Shots per session</div>
-          <LineTrend data={sessionChartData} valueKey="shots" labelKey="label" />
+          <div className="card-title">Last session — {fmtDate(lastSession.start)}</div>
+          <div className="section-sub" style={{ marginBottom: 10 }}>
+            {lastSessionStats.totalShots} shots · {lastSessionStats.clubs.map(clubDisplayName).join(", ")}
+          </div>
+          {lastSessionStats.primaryClub && (
+            <div className="stat-strip">
+              <div><span className="stat-num">{fmt0(lastSessionStats.avgCarry)}y</span><span className="stat-lbl">{clubDisplayName(lastSessionStats.primaryClub)} avg carry</span></div>
+              <div><span className="stat-num">{fmt0(lastSessionStats.bigMissRate * 100)}%</span><span className="stat-lbl">big misses</span></div>
+              <div><span className="stat-num" style={{ textTransform: "capitalize" }}>{lastSessionStats.domFam || "—"}</span><span className="stat-lbl">tendency</span></div>
+            </div>
+          )}
         </div>
       )}
 
-      {topIssue && (
-        <button className="focus-callout" onClick={onGoInsights}>
-          <div className="focus-callout-eyebrow">TOP FOCUS FOR YOUR NEXT SESSION</div>
-          <div className="focus-callout-title">{topIssue.headline}</div>
-          <div className="focus-callout-cta">See all insights <ChevronRight size={14} /></div>
+      {insights.length > 0 && (
+        <div className="card">
+          <div className="card-title">Focus areas for next session</div>
+          {insights.slice(0, 3).map((iss, i) => (
+            <button className="mini-focus-row" key={i} onClick={() => onNavigate("insights")}>
+              <span className="insight-rank" style={{ width: 22, height: 22, fontSize: 12.5, flex: "0 0 auto" }}>{i + 1}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="mini-focus-headline">{iss.headline}</div>
+                <div className="mini-focus-cat">{iss.category}</div>
+              </div>
+              <SeverityBadge severity={iss.severity} />
+            </button>
+          ))}
+          <button className="focus-callout-cta" style={{ background: "none", border: "none", padding: "6px 0 0", cursor: "pointer" }} onClick={() => onNavigate("insights")}>
+            See all insights <ChevronRight size={14} />
+          </button>
+        </div>
+      )}
+
+      {swingCheck && swingCheck.pctInRange < 0.6 && (
+        <button className="focus-callout" style={{ borderColor: COLORS.rustSoft }} onClick={() => onNavigate("trends")}>
+          <div className="focus-callout-eyebrow" style={{ color: COLORS.rust }}>SWING CHECK</div>
+          <div className="focus-callout-title">{swingCheck.label} on {clubDisplayName(swingCheck.club)} is only in range {fmt0(swingCheck.pctInRange * 100)}% of the time</div>
+          <div className="focus-callout-cta">See the trend <ChevronRight size={14} /></div>
         </button>
+      )}
+
+      {bagSnapshot.length > 0 && (
+        <div className="card" style={{ padding: 0 }}>
+          <div className="card-title-row" style={{ padding: "14px 14px 0" }}>
+            <div className="card-title">Yardage snapshot</div>
+            <button className="link-btn" onClick={() => onNavigate("bag")}>Full bag <ChevronRight size={12} /></button>
+          </div>
+          <div style={{ padding: "10px 14px 14px" }}>
+            <BarListChart data={bagSnapshot} valueKey="carry" labelKey="name" colorFn={() => COLORS.gold} formatValue={(d) => `${d.carry}y`} />
+          </div>
+        </div>
+      )}
+
+      {shots.length > 0 && (
+        <div className="card">
+          <div className="card-title-row">
+            <div className="card-title">Miss tendency</div>
+            <button className="link-btn" onClick={() => onNavigate("misses")}>Details <ChevronRight size={12} /></button>
+          </div>
+          <div className="bias-bar">
+            <div style={{ width: `${missBias.left * 100}%`, background: COLORS.teal }} />
+            <div style={{ width: `${missBias.straight * 100}%`, background: COLORS.gold }} />
+            <div style={{ width: `${missBias.right * 100}%`, background: COLORS.rust }} />
+          </div>
+          <div className="bias-legend">
+            <span><span className="dot" style={{ background: COLORS.teal }} />Left {fmt0(missBias.left * 100)}%</span>
+            <span><span className="dot" style={{ background: COLORS.gold }} />Straight {fmt0(missBias.straight * 100)}%</span>
+            <span><span className="dot" style={{ background: COLORS.rust }} />Right {fmt0(missBias.right * 100)}%</span>
+          </div>
+        </div>
       )}
     </div>
   );
 }
 
 /* ---------------- Bag (yardage ladder) ---------------- */
-function BagTab({ clubStats }) {
+function BagTab({ clubStats, onShowDetail }) {
   const data = useMemo(() => {
     return [...clubStats]
       .filter((c) => c.avgCarry > 0)
@@ -883,12 +1195,28 @@ function BagTab({ clubStats }) {
         carry: Math.round(c.avgCarry),
         range: [Math.round(c.minCarry), Math.round(c.maxCarry)],
         total: Math.round(c.avgTotal),
+        stdCarry: c.stdCarry,
         count: c.count,
         club: c.club,
       }));
   }, [clubStats]);
 
   if (!data.length) return <div className="tab-pane"><NoDataNote /></div>;
+
+  const handleClick = (d) => {
+    onShowDetail && onShowDetail(
+      d.name,
+      `${d.count} shot${d.count === 1 ? "" : "s"} logged`,
+      [
+        { label: "Avg Carry", value: `${d.carry}y` },
+        { label: "Avg Total", value: `${d.total}y` },
+        { label: "Avg Roll", value: `${d.total - d.carry}y` },
+        { label: "Shortest Carry", value: `${d.range[0]}y` },
+        { label: "Longest Carry", value: `${d.range[1]}y` },
+        { label: "Carry Spread (σ)", value: `${fmt1(d.stdCarry)}y` },
+      ]
+    );
+  };
 
   return (
     <div className="tab-pane">
@@ -900,6 +1228,7 @@ function BagTab({ clubStats }) {
           labelKey="name"
           colorFn={() => COLORS.gold}
           formatValue={(d) => `${d.carry}y`}
+          onRowClick={handleClick}
         />
       </div>
 
@@ -911,7 +1240,7 @@ function BagTab({ clubStats }) {
           </thead>
           <tbody>
             {data.map((d) => (
-              <tr key={d.club}>
+              <tr key={d.club} onClick={() => handleClick(d)} style={{ cursor: "pointer" }}>
                 <td>{d.name}</td>
                 <td>{d.carry}y</td>
                 <td>{d.total}y</td>
@@ -927,7 +1256,7 @@ function BagTab({ clubStats }) {
 }
 
 /* ---------------- Dispersion (signature top-down view) ---------------- */
-function DispersionTab({ clubStats, dispersionClub, setDispersionClub, availableClubs }) {
+function DispersionTab({ clubStats, dispersionClub, setDispersionClub, availableClubs, onShowDetail }) {
   const cs = clubStats.find((c) => c.club === dispersionClub) || clubStats[0];
 
   const points = useMemo(() => {
@@ -938,6 +1267,7 @@ function DispersionTab({ clubStats, dispersionClub, setDispersionClub, available
       fam: missFamily(s.classification),
       big: isBigMiss(s.classification),
       classification: s.classification,
+      shot: s,
     }));
   }, [cs]);
 
@@ -945,6 +1275,14 @@ function DispersionTab({ clubStats, dispersionClub, setDispersionClub, available
   const maxOffline = points.length ? Math.max(20, Math.max(...points.map((p) => Math.abs(p.x))) * 1.25) : 20;
 
   if (!availableClubs.length) return <div className="tab-pane"><NoDataNote /></div>;
+
+  const handlePointClick = (shot) => {
+    onShowDetail && onShowDetail(
+      `${clubDisplayName(shot.club)} · ${shot.classification || "Unclassified"}`,
+      fmtDateTime(shot.date),
+      shotDetailRows(shot)
+    );
+  };
 
   return (
     <div className="tab-pane">
@@ -957,7 +1295,7 @@ function DispersionTab({ clubStats, dispersionClub, setDispersionClub, available
       {cs && (
         <div className="card range-card">
           <div className="card-title">{clubDisplayName(cs.club)} — looking downrange</div>
-          <DispersionSVG points={points} maxOffline={maxOffline} maxCarry={maxCarry} />
+          <DispersionSVG points={points} maxOffline={maxOffline} maxCarry={maxCarry} onPointClick={handlePointClick} />
           <div className="legend-row">
             <LegendDot color={COLORS.teal} label="Left miss" />
             <LegendDot color={COLORS.gold} label="Straight" />
@@ -979,15 +1317,15 @@ function LegendDot({ color, label }) {
 }
 
 /* ---------------- Misses ---------------- */
-function MissesTab({ shots, clubStats }) {
+function MissesTab({ shots, clubStats, onShowDetail }) {
   const tally = useMemo(() => {
     const t = {};
     shots.forEach((s) => {
       const key = s.classification || "Unclassified";
-      t[key] = (t[key] || 0) + 1;
+      (t[key] = t[key] || []).push(s);
     });
     return Object.entries(t)
-      .map(([name, count]) => ({ name, count, fam: missFamily(name) }))
+      .map(([name, list]) => ({ name, count: list.length, fam: missFamily(name), shots: list }))
       .sort((a, b) => b.count - a.count);
   }, [shots]);
 
@@ -1001,6 +1339,37 @@ function MissesTab({ shots, clubStats }) {
   }, [shots]);
 
   if (!shots.length) return <div className="tab-pane"><NoDataNote /></div>;
+
+  const handleTallyClick = (d) => {
+    const clubCounts = {};
+    d.shots.forEach((s) => { clubCounts[s.club] = (clubCounts[s.club] || 0) + 1; });
+    const topClubs = Object.entries(clubCounts).sort((a, b) => b[1] - a[1]).slice(0, 3)
+      .map(([club, n]) => `${clubDisplayName(club)} (${n})`).join(", ");
+    const recent = [...d.shots].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 3);
+    const rows = [
+      { label: "Share of shots", value: `${fmt0((d.count / shots.length) * 100)}%` },
+      { label: "Direction", value: d.fam === "left" ? "Left" : d.fam === "right" ? "Right" : "Straight", color: familyColor(d.fam) },
+      { label: "Most common on", value: topClubs || "—" },
+    ];
+    recent.forEach((s, i) => {
+      rows.push({ label: `Recent example ${i + 1}`, value: `${fmtDate(s.date)} · ${clubDisplayName(s.club)} · ${fmt1(s.carry)}y, ${fmtSigned1(s.offline)}y` });
+    });
+    onShowDetail && onShowDetail(d.name, `${d.count} shot${d.count === 1 ? "" : "s"}`, rows);
+  };
+
+  const handleClubRowClick = (c) => {
+    onShowDetail && onShowDetail(
+      clubDisplayName(c.club),
+      `${c.count} shots`,
+      [
+        { label: "Dominant miss", value: c.dominantMiss || "—" },
+        { label: "Dominant miss share", value: `${fmt0(c.dominantMissPct * 100)}%` },
+        { label: "Avg offline bias", value: `${fmtSigned1(c.avgOffline)}y`, color: Math.abs(c.avgOffline) < 4 ? undefined : familyColor(c.avgOffline > 0 ? "right" : "left") },
+        { label: "Left misses", value: `${fmt0(c.leftPct * 100)}%` },
+        { label: "Right misses", value: `${fmt0(c.rightPct * 100)}%` },
+      ]
+    );
+  };
 
   return (
     <div className="tab-pane">
@@ -1026,6 +1395,7 @@ function MissesTab({ shots, clubStats }) {
           labelKey="name"
           colorFn={(d) => familyColor(d.fam)}
           formatValue={(d) => d.count}
+          onRowClick={handleTallyClick}
         />
       </div>
 
@@ -1035,7 +1405,7 @@ function MissesTab({ shots, clubStats }) {
           <thead><tr><th>Club</th><th>Dominant miss</th><th>Bias</th></tr></thead>
           <tbody>
             {clubStats.filter((c) => c.count >= 2).sort((a, b) => clubSortIndex(a.club) - clubSortIndex(b.club)).map((c) => (
-              <tr key={c.club}>
+              <tr key={c.club} onClick={() => handleClubRowClick(c)} style={{ cursor: "pointer" }}>
                 <td>{clubDisplayName(c.club)}</td>
                 <td>{c.dominantMiss || "—"} <span className="muted">({fmt0(c.dominantMissPct * 100)}%)</span></td>
                 <td style={{ color: Math.abs(c.avgOffline) < 4 ? COLORS.textMuted : familyColor(c.avgOffline > 0 ? "right" : "left") }}>
@@ -1050,8 +1420,96 @@ function MissesTab({ shots, clubStats }) {
   );
 }
 
+/* ---------------- Trends (swing metrics over time) ---------------- */
+function TrendsTab({ clubStats, availableClubs, trendsClub, setTrendsClub, trendsMetric, setTrendsMetric, onShowDetail }) {
+  const cs = clubStats.find((c) => c.club === trendsClub) || clubStats[0];
+  const [showRaw, setShowRaw] = useState(true);
+  const [showTrend, setShowTrend] = useState(true);
+
+  const metricSummaries = useMemo(() => {
+    if (!cs) return [];
+    return computeMetricStatsForClub(cs.club, cs.shots);
+  }, [cs]);
+
+  const dataMetrics = metricSummaries.filter((m) => m.hasData);
+  const activeMetric = dataMetrics.find((m) => m.key === trendsMetric) || dataMetrics[0];
+
+  if (!availableClubs.length) return <div className="tab-pane"><NoDataNote /></div>;
+
+  const handlePointClick = (p) => {
+    const inRange = p.v >= activeMetric.range[0] && p.v <= activeMetric.range[1];
+    const rows = [
+      { label: activeMetric.label, value: `${fmtSigned1(p.v)}${activeMetric.unit}`, color: inRange ? COLORS.teal : COLORS.rust },
+      { label: "Ideal range", value: `${fmt1(activeMetric.range[0])}${activeMetric.unit} to ${fmt1(activeMetric.range[1])}${activeMetric.unit}` },
+      ...shotDetailRows(p.shot),
+    ];
+    onShowDetail && onShowDetail(clubDisplayName(p.shot.club), fmtDateTime(p.shot.date), rows);
+  };
+
+  return (
+    <div className="tab-pane">
+      <div className="chip-row" style={{ marginBottom: 10 }}>
+        {availableClubs.map((c) => (
+          <Chip key={c} active={trendsClub === c} onClick={() => setTrendsClub(c)}>{clubDisplayName(c)}</Chip>
+        ))}
+      </div>
+
+      {!dataMetrics.length && (
+        <div className="card">
+          <div className="card-title" style={{ marginBottom: 0 }}>No face/path/tempo data for {clubDisplayName(cs.club)} yet</div>
+          <div className="method-note" style={{ marginTop: 8 }}>Your Trackman export doesn't include these fields for this club's shots (some radar/session types skip them) — carry, offline, and dispersion still work fine on the other tabs.</div>
+        </div>
+      )}
+
+      {activeMetric && (
+        <div className="card">
+          <div className="card-title-row">
+            <div className="card-title">{activeMetric.label} over time — {clubDisplayName(cs.club)}</div>
+          </div>
+          <div className="chip-row" style={{ marginBottom: 8 }}>
+            <Chip active={showRaw} onClick={() => setShowRaw((v) => !v)}>Raw shots</Chip>
+            <Chip active={showTrend} onClick={() => setShowTrend((v) => !v)}>Trend line</Chip>
+          </div>
+          {showRaw || showTrend ? (
+            <MetricTrendSVG points={activeMetric.points} idealRange={activeMetric.range} unit={activeMetric.unit} showRaw={showRaw} showTrend={showTrend} onPointClick={showRaw ? handlePointClick : undefined} />
+          ) : (
+            <div className="method-note">Turn on "Raw shots" or "Trend line" to see the chart.</div>
+          )}
+          <div className="stat-strip">
+            <div><span className="stat-num">{fmtSigned1(activeMetric.avg)}{activeMetric.unit}</span><span className="stat-lbl">average</span></div>
+            <div><span className="stat-num">{fmt0(activeMetric.pctInRange * 100)}%</span><span className="stat-lbl">in range</span></div>
+            <div><span className="stat-num">{activeMetric.improving ? "tightening" : activeMetric.worsening ? "drifting" : "steady"}</span><span className="stat-lbl">trend</span></div>
+          </div>
+          <div className="method-note" style={{ marginTop: 10 }}>{activeMetric.desc} Shaded band is a rough, general-guideline ideal range for this club — not a personalized target. Gold line is a smoothed (moving-average) trend, not a strict regression fit. {showRaw ? "Tap a dot for that shot's full detail." : ""}</div>
+        </div>
+      )}
+
+      {dataMetrics.length > 1 && (
+        <div className="card" style={{ padding: 0 }}>
+          <div className="card-title" style={{ padding: "14px 14px 6px" }}>All tracked metrics — {clubDisplayName(cs.club)}</div>
+          <div className="metric-grid">
+            {dataMetrics.map((m) => (
+              <button
+                key={m.key}
+                className={"metric-tile" + (activeMetric && activeMetric.key === m.key ? " active" : "")}
+                onClick={() => setTrendsMetric(m.key)}
+              >
+                <div className="metric-tile-label">{m.label}</div>
+                <div className="metric-tile-val">{fmtSigned1(m.avg)}{m.unit}</div>
+                <div className="metric-tile-status" style={{ color: m.pctInRange >= 0.6 ? COLORS.teal : m.pctInRange >= 0.35 ? COLORS.gold : COLORS.rust }}>
+                  {fmt0(m.pctInRange * 100)}% in range
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ---------------- Insights ---------------- */
-function InsightsTab({ insights, sgProxy }) {
+function InsightsTab({ insights, sgProxy, onShowDetail }) {
   const [showMethod, setShowMethod] = useState(false);
 
   if (!insights.length) {
@@ -1065,6 +1523,19 @@ function InsightsTab({ insights, sgProxy }) {
       </div>
     );
   }
+
+  const handleSgClick = (d, i) => {
+    const s = sgProxy[i];
+    onShowDetail && onShowDetail(
+      clubDisplayName(s.club),
+      `${s.count} shot${s.count === 1 ? "" : "s"}`,
+      [
+        { label: "Approx SG / shot", value: fmtSigned1(Math.round(s.avgSg * 100) / 100), color: s.avgSg >= 0 ? COLORS.teal : COLORS.rust },
+        { label: "Shot count", value: s.count },
+        { label: "Basis", value: "Vs. rough Tour avg proximity by distance" },
+      ]
+    );
+  };
 
   return (
     <div className="tab-pane">
@@ -1100,6 +1571,7 @@ function InsightsTab({ insights, sgProxy }) {
             valueKey="val"
             labelKey="name"
             formatValue={(d) => fmtSigned1(d.val)}
+            onRowClick={handleSgClick}
           />
         </div>
       )}
@@ -1108,6 +1580,30 @@ function InsightsTab({ insights, sgProxy }) {
 }
 
 /* ---------------- Data management panel ---------------- */
+function DetailSheet({ title, subtitle, rows, onClose }) {
+  return (
+    <div className="panel-overlay" onClick={onClose}>
+      <div className="panel" onClick={(e) => e.stopPropagation()}>
+        <div className="panel-header">
+          <div>
+            <div className="panel-title">{title}</div>
+            {subtitle && <div className="panel-sub" style={{ marginBottom: 0 }}>{subtitle}</div>}
+          </div>
+          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="detail-grid">
+          {rows.map((r, i) => (
+            <div className="detail-row" key={i}>
+              <div className="detail-label">{r.label}</div>
+              <div className="detail-value" style={r.color ? { color: r.color } : undefined}>{r.value}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DataPanel({ onClose, onUpload, onExport, onImport, sessions, onDeleteSession, totalShots }) {
   return (
     <div className="panel-overlay" onClick={onClose}>
@@ -1220,22 +1716,39 @@ function GlobalStyle() {
       .stat-lbl { font-size: 10px; color: ${COLORS.textFaint}; margin-top: 2px; }
 
       .barlist { display: flex; flex-direction: column; gap: 10px; }
-      .barlist-row { display: grid; grid-template-columns: 60px 1fr 54px; align-items: center; gap: 8px; }
+      .barlist-row { display: grid; grid-template-columns: 60px 1fr 54px; align-items: center; gap: 8px; width: 100%; background: none; border: none; padding: 0; font: inherit; color: inherit; text-align: left; }
+      button.barlist-row { cursor: pointer; }
+      button.barlist-row:active { opacity: 0.7; }
       .barlist-label { font-size: 11.5px; color: ${COLORS.text}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .barlist-track { height: 10px; background: ${COLORS.bg}; border-radius: 100px; border: 1px solid ${COLORS.lineSoft}; overflow: hidden; }
       .barlist-fill { height: 100%; border-radius: 100px; }
       .barlist-value { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: ${COLORS.textMuted}; text-align: right; white-space: nowrap; }
 
       .divbar { display: flex; flex-direction: column; gap: 10px; }
-      .divbar-row { display: grid; grid-template-columns: 56px 1fr 50px; align-items: center; gap: 8px; }
+      .divbar-row { display: grid; grid-template-columns: 56px 1fr 50px; align-items: center; gap: 8px; width: 100%; background: none; border: none; padding: 0; font: inherit; color: inherit; text-align: left; }
+      button.divbar-row { cursor: pointer; }
+      button.divbar-row:active { opacity: 0.7; }
       .divbar-label { font-size: 11.5px; color: ${COLORS.text}; }
       .divbar-track { position: relative; height: 10px; background: ${COLORS.bg}; border-radius: 100px; border: 1px solid ${COLORS.lineSoft}; overflow: hidden; }
       .divbar-center { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: ${COLORS.line}; }
       .divbar-fill { position: absolute; top: 0; bottom: 0; border-radius: 100px; }
       .divbar-value { font-family: 'JetBrains Mono', monospace; font-size: 11px; text-align: right; white-space: nowrap; }
 
-      .sparkline-labels { display: flex; justify-content: space-between; margin-top: 4px; }
-      .sparkline-labels span { font-size: 9px; color: ${COLORS.textFaint}; }
+      .detail-grid { display: flex; flex-direction: column; }
+      .detail-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 2px; border-bottom: 1px solid ${COLORS.lineSoft}; }
+      .detail-row:last-child { border-bottom: none; }
+      .detail-label { font-size: 12.5px; color: ${COLORS.textMuted}; }
+      .detail-value { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: ${COLORS.text}; font-weight: 500; }
+
+      .metric-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; padding: 4px 14px 14px; }
+      .metric-tile {
+        text-align: left; background: ${COLORS.bg}; border: 1px solid ${COLORS.lineSoft}; border-radius: 10px;
+        padding: 10px; cursor: pointer;
+      }
+      .metric-tile.active { border-color: ${COLORS.goldSoft}; }
+      .metric-tile-label { font-size: 10.5px; color: ${COLORS.textMuted}; margin-bottom: 3px; }
+      .metric-tile-val { font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 600; color: ${COLORS.text}; }
+      .metric-tile-status { font-size: 9.5px; margin-top: 3px; }
 
       .data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
       .data-table th { text-align: left; font-size: 10.5px; color: ${COLORS.textFaint}; font-weight: 500; padding: 6px 14px; border-bottom: 1px solid ${COLORS.lineSoft}; }
@@ -1255,6 +1768,18 @@ function GlobalStyle() {
       .focus-callout-eyebrow { font-family: 'JetBrains Mono', monospace; font-size: 9.5px; letter-spacing: 0.1em; color: ${COLORS.gold}; margin-bottom: 6px; }
       .focus-callout-title { font-size: 14px; font-weight: 600; color: ${COLORS.text}; line-height: 1.35; }
       .focus-callout-cta { display: flex; align-items: center; gap: 2px; font-size: 12px; color: ${COLORS.goldSoft}; margin-top: 8px; }
+
+      .card-title-row .link-btn {
+        display: flex; align-items: center; gap: 2px; background: none; border: none; cursor: pointer;
+        font-size: 11.5px; color: ${COLORS.goldSoft}; padding: 0; margin-bottom: 8px;
+      }
+      .mini-focus-row {
+        display: flex; align-items: center; gap: 10px; width: 100%; background: none; border: none;
+        border-top: 1px solid ${COLORS.lineSoft}; padding: 10px 0; cursor: pointer; text-align: left;
+      }
+      .mini-focus-row:first-of-type { border-top: none; padding-top: 8px; }
+      .mini-focus-headline { font-size: 12.5px; font-weight: 500; color: ${COLORS.text}; line-height: 1.35; }
+      .mini-focus-cat { font-size: 10px; color: ${COLORS.textFaint}; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.04em; }
 
       .insight-card { background: ${COLORS.surface}; border: 1px solid ${COLORS.lineSoft}; border-radius: 14px; padding: 14px; }
       .insight-top { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
@@ -1291,7 +1816,7 @@ function GlobalStyle() {
         background: ${COLORS.surface}; border-top: 1px solid ${COLORS.lineSoft};
         padding: 8px 4px calc(8px + env(safe-area-inset-bottom));
       }
-      .tab-btn { background: none; border: none; display: flex; flex-direction: column; align-items: center; cursor: pointer; padding: 4px 8px; }
+      .tab-btn { background: none; border: none; display: flex; flex-direction: column; align-items: center; cursor: pointer; padding: 4px 3px; flex: 1; min-width: 0; }
 
       .panel-overlay { position: fixed; inset: 0; background: rgba(8,14,10,0.6); display: flex; align-items: flex-end; z-index: 50; }
       .panel {

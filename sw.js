@@ -1,4 +1,4 @@
-const CACHE_NAME = "yardage-book-v3";
+const CACHE_NAME = "yardage-book-v6";
 const APP_SHELL = [
   "./",
   "./index.html",
